@@ -14,7 +14,7 @@
 The protocol's redemption logic conservatively rounds in favor of the redeemer rather than the protocol. Specifically, `sNext^2` is rounded down, which reduces the value of the subtrahend in the area calculation, leading to an overpayment of assets. This can be exploited through repeated tiny redemptions to drain the vault.
 
 ### Root Cause
-In [`ProgressiveCurve.sol#L225-L243`](https://github.com/Example/ProgressiveCurve.sol#L225-L243) and [`OffsetProgressiveCurve.sol#L232-L250`](https://github.com/Example/OffsetProgressiveCurve.sol#L232-L250), the `_convertToAssets` function uses `PCMath.square(sNext)` which rounds down. In a redemption context, the subtrahend should be rounded up to ensure conservative accounting.
+In [`ProgressiveCurve.sol#L225-L243`](https://github.com/code-423n4/2026-03-intuition/blob/314b7d4d9ccbaf27e4484a6c0706af83d3f75f36/src/protocol/curves/ProgressiveCurve.sol#L225-L243) and [`OffsetProgressiveCurve.sol#L232-L250`](https://github.com/code-423n4/2026-03-intuition/blob/314b7d4d9ccbaf27e4484a6c0706af83d3f75f36/src/protocol/curves/OffsetProgressiveCurve.sol#L232-L250), the `_convertToAssets` function uses `PCMath.square(sNext)` which rounds down. In a redemption context, the subtrahend should be rounded up to ensure conservative accounting.
 
 ```solidity
 // Current Implementation
@@ -108,7 +108,7 @@ Logs:
 The `TrustSwapAndBridgeRouter` fails to account for fee-on-transfer tokens, leading to reverts during the swap process because it attempts to swap more tokens than it actually received from the user.
 
 ### Root Cause
-In [`TrustSwapAndBridgeRouter.sol`](https://github.com/Example/TrustSwapAndBridgeRouter.sol), the contract assumes that `amountIn` tokens were correctly transferred, but FOT tokens deduct a fee on each transfer.
+In [`TrustSwapAndBridgeRouter.sol`](https://github.com/0xIntuition/intuition-contracts-v2-periphery/blob/b026521fe26db8249cd0795b62ec480fd8c848e8/contracts/TrustSwapAndBridgeRouter.sol#L148), the contract assumes that `amountIn` tokens were correctly transferred, but FOT tokens deduct a fee on each transfer.
 
 ```solidity
 IERC20(tokenIn).safeTransferFrom(msg.sender, address(this), amountIn);
