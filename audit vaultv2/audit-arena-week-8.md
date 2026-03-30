@@ -1,108 +1,99 @@
-# TokenStream.sol — Audit Findings
+# Audit Arena Week 8 Findings (From CSV)
+
+Source: `NVN404_Submissions.csv`
+
+## 1. [c2]-Reentrancy in withdraw() via CEI Violation
+
+- Date: 2026-03-23T11:27:25.838803
+- Severity: Critical
+- Scope: -
+- Reporter: @yun0hu
+
+### Details
+
+[c2]-Reentrancy in withdraw() via CEI Violation
+A malicious token with transfer hooks lets the beneficiary re-enter withdraw() before state updates, claiming the same amount repeatedly until the stream is drained.
+
+Root Cause: token.transfer() is called before s.withdrawn += available, violating CEI.
+
+Attack Path:
+Beneficiary is a contract with a token receive hook
+withdraw() triggers the hook mid execution
+Hook re enters withdraw()  functions s.withdrawn 
+Repeat until drained
+
+Recommendation: Move s.withdrawn += available to before the token.transfer() call.
 
 ---
 
-## Finding 1
+## 2. Title: Owner Steals Vested Tokens on Cancel
 
-**Title:** Unrestricted Beneficiary Hijacking via `updateBeneficiary()`
+- Date: 2026-03-23T11:43:45.769435
+- Severity: High
+- Scope: -
+- Reporter: @yun0hu
 
-**Severity:** Critical
+### Details
 
-**Scope:** `updateBeneficiary()`
+Title: Owner Steals Vested Tokens on Cancel 
+Owner receives all unwithdrawm tokens when cancels including what the beneficiary already vested. Beneficiary loses earned tokens. 
 
-**Summary / Impact:**
-Any external caller can reassign the beneficiary of any stream to an address they control, then immediately call `withdraw()` to drain all vested tokens. Complete and irreversible loss of funds for the legitimate beneficiary.
+Root Cause: Cancel uses totalAmount - withdrawn instead of accounting for vested amount separately.
 
-**Root Cause:**
-`updateBeneficiary()` has zero access control. No check that the caller is the owner or the current beneficiary of the stream.
+Attack Path:
+1. Stream is 60% vested, beneficiary withdrawn 0%
+2. Owner cancels — takes 100%
+3. Beneficiary loses their 60% vested share
 
-**Attack Path:**
-1. Attacker spots an active stream ID on-chain
-2. Calls `updateBeneficiary(id, attackerAddress)`
-3. Calls `withdraw(id)` and drains all vested tokens
-
-**Recommendation:**
-Add `require(msg.sender == owner || msg.sender == s.beneficiary, "Not authorized")` before updating the beneficiary.
-
----
-
-## Finding 2
-
-**Title:** Owner Steals Vested-But-Unwithdrawn Tokens on Cancel
-
-**Severity:** High
-
-**Scope:** `cancel()`
-
-**Summary / Impact:**
-When owner cancels a stream, they receive `totalAmount - withdrawn` which incorrectly includes tokens the beneficiary has already vested but not yet claimed. Even a non-malicious owner calling cancel will cause direct fund loss for the beneficiary with no recovery path.
-
-**Root Cause:**
-`cancel()` computes `remaining = totalAmount - withdrawn` and sends it all to the owner. This does not account for the vested amount — tokens earned by the beneficiary are treated as an owner refund.
-
-**Attack Path:**
-1. Stream is 60% through its duration, beneficiary has withdrawn 0%
-2. Owner calls `cancel()`
-3. `remaining = 1000 - 0 = 1000` — owner receives everything
-4. Beneficiary loses their 600 vested tokens with no recourse
-
-**Recommendation:**
-On cancel, split the refund correctly:
-- Send `vested(id) - s.withdrawn` to the beneficiary
-- Send `totalAmount - vested(id)` back to the owner
+Recommendation: On cancel, send vested(id) - s.withdrawn to beneficiary, then refund totalAmount - vested(id) to owner.
 
 ---
 
-## Finding 3
+## 3. [H]-Double-Cancel Executes Stale Transfer
 
-**Title:** Double-Cancel Drains Funds Belonging to Other Streams
+- Date: 2026-03-23T11:48:25.403416
+- Severity: High
+- Scope: -
+- Reporter: yun0hu
 
-**Severity:** Medium
+### Details
 
-**Scope:** `cancel()`
+[H]-Double-Cancel Executes Stale Transfer
 
-**Summary / Impact:**
-An already-canceled stream can be canceled again. Since the contract holds tokens for all streams in a single pool, the second cancel re-executes the transfer with stale `remaining` value and dips into balances belonging to other streams' beneficiaries.
+Already canceled stream can be canceled again, reexecuting transfer logic on stale state. 
 
-**Root Cause:**
-No `require(!s.canceled)` guard at the top of `cancel()`. `s.withdrawn` is never updated on cancel so the stale `remaining` value persists across calls.
+Root Cause: No require(!s.canceled) guard at top of cancel().
 
-**Attack Path:**
-1. Stream 1 has 1000 tokens, Stream 2 has 500 tokens in the same contract
-2. Owner cancels Stream 1 — `remaining = 1000`, funds sent out
-3. Owner calls `cancel()` on Stream 1 again
-4. `remaining = 1000 - 0 = 1000` (stale) — contract pays from Stream 2's balance
-5. Stream 2 beneficiary loses their funds
+ Attack Path:
+1. Owner cancels — funds sent out
+2. Owner calls cancel() again on same id -> logic re-executes
 
-**Recommendation:**
-Add `require(!s.canceled, "Already canceled")` at the start of `cancel()`.
+Recommendation: Add require(!s.canceled, "Already canceled") at the start of cancel().
 
 ---
 
-## Finding 4 
+## 4. No Input Validation in updateBeneficiary
 
-**Title:** Reentrancy in `withdraw()` via CEI Violation
+- Date: 2026-03-24T03:20:20.532244
+- Severity: High
+- Scope: -
+- Reporter: @yun0hu
 
-**Severity:** Critical (OOS — requires non-standard ERC20)
+### Details
 
-**Scope:** `withdraw()`
+No Input Validation in updateBeneficiary
 
-**Summary / Impact:**
-`token.transfer()` is called before `s.withdrawn` is updated. A token with transfer hooks (e.g. ERC777) allows the beneficiary to re-enter `withdraw()` before state updates, draining the stream by repeatedly claiming the same `available` amount.
+Doesn't validate the stream ID exists
+Doesn't prevent changing beneficiary to address(0) (breaks future withdrawals)
 
-**Root Cause:**
-Violates Checks-Effects-Interactions pattern. State update happens after the external call.
+root cause : no input validation 
 
-**Attack Path:**
-1. Beneficiary is a contract with a token receive hook
-2. `withdraw()` triggers the hook mid-execution
-3. Hook re-enters `withdraw()` — `s.withdrawn` still old, `available` same
-4. Repeat until stream is fully drained
+attack path :the owener can set the address of the benfeciaries to address(0)
+which leads to loss of users funds
 
-**Recommendation:**
-Move `s.withdrawn += available` to before the `token.transfer()` call.
+recommendation fix : 
+add validation 
+equire(streams[id].beneficiary != address(0), "Stream does not exist");
+require(newBeneficiary != address(0), "Invalid address");
 
 ---
-the end
-
-

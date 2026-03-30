@@ -1,200 +1,217 @@
-# SimpleStaking Contract — Security Audit Report
+# Audit Arena Week 6 Findings (From CSV)
 
-**Auditor:** yunohu
-**Date:** 2026-03-09
-**Scope:** [`audit-arena-week-6.sol`  ](https://github.com/radcipher/auditvault/blob/main/competitions/audit-arena-week-6.sol)
-**Language:** Solidity ^0.8.20  
+Source: `NVN404_Submissions.csv`
 
----
+## 1. Missing access control on updateRate()
 
-## Summary
+- Date: 2026-03-09T09:16:01.144785
+- Severity: High
+- Scope: audit-arena-week-6.sol:updateRate()
+- Reporter: yun0hu
 
-| ID  | Title                                                                 | Severity |
-|-----|-----------------------------------------------------------------------|----------|
-| H-1 | Reward calculation ignores staked balance — anyone can drain the pool | High     |
-| H-2 | Missing access control on `updateRate`                                | High     |
-| H-3 | Incorrect `stakeTokenBalance` returns ETH balance instead of ERC20   | High     |
-| H-4 | incorrect calculation of principal and rewards leads to loss of user deposits        | High     |
-| H-5 | Reentrancy via CEI violation in `_claimRewards`                       | High     |
-| H-6 | sudden reward rate change destroys previously accrued user yield        | High     |
-| M-1 | `tx.origin` used for access control — phishing vector                 | Medium   |
+### Details
 
----
+Missing access control on updateRate()
 
-## H-1 — Reward Calculation Ignores Staked Balance, Anyone Can Drain the Pool
+Anyone can call updateRate() and set rewardRatePerSecond to any value, including 0 or an very high number 
 
-### Summary / Impact
+root cause : no access specifiers
 
-The `_claimRewards` function calculates a user's reward by multiplying elapsed time by `rewardRatePerSecond`, completely ignoring the user's staked balance. Any address — even one with **zero tokens staked** — can call `claimRewards()`, initialize a timer, wait, and then claim rewards proportional to the time elapsed. This allows an attacker to drain the entire reward pool without locking any capital.
+attack path : 
+An attacker sets up an account with a valid lastUpdate timestamp.
+the attacker calls updateRate(type(uint256).max) and sets it to high rate .
+the attacker immediately calls claimRewards(). The contract computes their accrued time and multiplies it by the massively high rate.
+the contract transfers the maximum possible balance of the reward tokens to the attacker.
 
-### Root Cause
-
-In `_claimRewards`, the calculation:
-
-```solidity
-uint256 reward = elapsed * rewardRatePerSecond;
-```
-
-fails to account for the user's share of the pool (`staked[user]`).
-
-### Attack Path
-
-Attacker calls `claimRewards()` with 0 tokens staked. `lastUpdate[msg.sender]` is initialized to `block.timestamp`.
-Attacker waits for an arbitrary time `T`.
-Attacker calls `claimRewards()` again.
-Contract computes `reward = T * rewardRatePerSecond`.
-Contract transfers the reward amount to the attacker despite 0 tokens being staked.
-
-### Recommended Fix
-
-Multiply reward by the user's staked weight:
-
-```solidity
-uint256 reward = (elapsed * staked[user] * rewardRatePerSecond) / PRECISION;
-```
-
----
-
-## H-2 — Missing Access Control on `updateRate` Allows Anyone to Manipulate Reward Logic
-
-### Summary / Impact
-
-The `updateRate` function is `external` but contains no access control check. Any address can set `rewardRatePerSecond` to an enormous value, wait one second, and drain the entire reward pool. Alternatively, it can be set to zero to grief all existing stakers.
-
-### Root Cause
-
-```solidity
-function updateRate(uint256 newRate) external {
-    // ← No require(msg.sender == owner) check!
-    rewardRatePerSecond = newRate;
-}
-```
-
-### Attack Path
-
-Attacker calls `updateRate(1_000_000_000 ether)`.
-Attacker waits 1 second.
-Attacker calls `claimRewards()` and drains the entire contract balance.
-
-### Recommended Fix
-
-```solidity
+recommended fix : 
 function updateRate(uint256 newRate) external {
     require(msg.sender == owner, "Not owner");
     rewardRatePerSecond = newRate;
 }
-```
 
 ---
 
-## H-3 — `stakeTokenBalance` Returns Native ETH Balance Instead of ERC20 Token Balance
+## 2. Reward calculation is independent of user's staked balance, allowing anyone to drain the reward pool for free
 
-### Summary / Impact
+- Date: 2026-03-09T09:33:02.555688
+- Severity: High
+- Scope: audit-arena-week-6.sol:_claimRewards()
+- Reporter: yun0hu
 
-The `stakeTokenBalance` function returns `address(stakeToken).balance`, which is the **native ETH balance** of the token contract, not the contract's ERC20 token balance. This value is almost always `0`. As a result, `emergencyWithdraw` will always transfer `0` tokens to the owner, making the recovery mechanism completely non-functional.
+### Details
 
-### Root Cause
+Reward calculation is independent of user's staked balance, allowing anyone to drain the reward pool for free
 
-```solidity
-function stakeTokenBalance() public view returns (uint256) {
-    return address(stakeToken).balance; // ← Returns ETH balance, not ERC20 balance!
-}
-```
+the _claimRewards function calculates a user's reward simply by multiplying the elapsed time. any address can interact with the contract to start a timer, wait, and claim rewards proportionate to the time elapsed , even if they have zero tokens staked. this allows attackers to easily drain the entire reward pool without risking or locking any of thier capital.
 
-### Attack Path
+root cause :in _claimRewards, the calculation uint256 reward = elapsed * rewardRatePerSecond; fails to account for the user's share of the pool (staked[user]).
 
-Owner calls `emergencyWithdraw()` to recover funds.
-`stakeTokenBalance()` returns `0` (ETH balance of the ERC20 contract).
+attack path :
+An attacker calls claimRewards() with 0 tokens staked. This bypasses the checks and initializes their lastUpdate[msg.sender] to the current block.timestamp.
+The attacker waits for a certain amount of time T.
+The attacker calls claimRewards() again.
+The contract computes the reward as elapsed * rewardRatePerSecond.
+The contract transfers the calculated reward amount to the attacker, successfully draining funds despite the attacker staking 0 tokens.
 
-`stakeToken.transfer(owner, 0)` executes — no funds are recovered.
-All staked tokens and rewards remain permanently locked if the normal flow breaks.
+recommended fix : 
 
-### Recommended Fix
+we should mulitply the reward with staked[user]
+uint256 reward = (elapsed * staked[user] * rewardRatePerSecond) ;
 
-```solidity
+this gives the reward according to the weight of the capital staked by the user
+
+---
+
+## 3. Incorrect balance check in stakeTokenBalance returns ETH balance instead of Token balance
+
+- Date: 2026-03-09T09:38:31.289802
+- Severity: High
+- Scope: audit-arena-week-6.sol:stakeTokenBalance()
+- Reporter: yun0hu
+
+### Details
+
+Incorrect balance check in stakeTokenBalance returns ETH balance instead of Token balance
+
+The stakeTokenBalance function returns address(stakeToken).balance, which gives the balance of ETH balance of the token contract itself instead of balance of the ERC20 token balance . 
+
+root cause : the code uses .balance on the token address instead of calling balanceOf(address(this)).
+
+attack path :
+when the owner attempts to use emergencyWithdraw() to recover mistakenly sent tokens or to migrate the pool.
+The function calculates the amount to transfer using stakeTokenBalance().
+Because address(stakeToken).balance is 0, the contract transfers 0 tokens to the owner, failing to perform the withdrawal.
+leading to not able to transfer tokens to safe place in case of emergency.
+
+recommendation :
 function stakeTokenBalance() public view returns (uint256) {
     return stakeToken.balanceOf(address(this));
 }
-```
 
 ---
 
-## H-4 — incorrect calculation of principal and rewards leads to loss of user deposits
+## 4. Use of tx.origin for authorization makes the contract vulnerable to phishing
 
-### Summary / Impact
+- Date: 2026-03-09T09:50:26.414023
+- Severity: Medium
+- Scope: -
+- Reporter: @yun0hu
 
-The contract holds both staked deposits and reward tokens in a **single shared balance** with no accounting separation. When `_claimRewards` executes, it transfers tokens from the overall contract balance. If the reward pool is insufficiently funded, the contract silently pays rewards using the **principal deposits of other users**, causing a direct and irreversible loss of staked capital.
+### Details
 
-### Root Cause
+Use of tx.origin for authorization makes the contract vulnerable to phishing
 
-There is no `totalStaked` variable to protect user deposits. The contract calls:
+The emergencyWithdraw function uses require(tx.origin == owner) instead of msg.sender == owner. This allows a malicious contract to "trick" the owner into calling it, which then calls SimpleStaking and successfully passes the check, allowing the attacker to trigger a withdrawal of all funds from the contract to the owner's address (disrupting the protocol).
+(it requires phishing the owner with fake malicious contract )
 
-```solidity
-stakeToken.transfer(user, reward);
-```
+root cause : usage of tx.origin 
 
-without verifying that the transfer amount does not dip into deposited principal.
+attack path :
+Attacker creates a malicious contract that calls SimpleStaking.emergencyWithdraw().
+attacker tricks the owner into calling a function on the malicious contract.
+the malicious contract calls SimpleStaking, and since the transaction was started by the owner, tx.origin == owner evaluates to true.
 
-### Attack Path
+recommendation :
+require(msg.sender == owner, "Not owner");
+always use msg.sender to avoid the above issues
 
-Alice and Bob each stake `1000` tokens. Contract balance = `2000`.
-Owner never calls `fundRewards()`.
-Time passes. Alice accrues `500` tokens in rewards.
-Alice calls `claimRewards()`. Contract pays `500` tokens from its `2000` balance.
-Contract balance = `1500`, but Alice and Bob still have `1000` each recorded in `staked`.
-`500` tokens of Bob's principal have been stolen to pay Alice's reward.
-Bob can no longer withdraw his full stake.
+---
 
-### Recommended Fix
+## 5. Rewards are paid out of user principal due to unsegregated balances, leading to loss of staked deposits
 
-Track total staked capital and enforce that rewards only come from surplus:
+- Date: 2026-03-09T11:11:27.365339
+- Severity: High
+- Scope: -
+- Reporter: @yun0hu
 
-```solidity
-uint256 public totalStaked;
+### Details
 
-// In stake():
+Rewards are paid out of user principal due to unsegregated balances, leading to loss of staked deposits
+
+The contract holds both the staked tokens and the reward tokens in the same balance (stakeToken.balanceOf(address(this))), but it fails to maintain separate accounting to protect user deposits. When _claimRewards is executed, it transfers tokens directly from the contract's overall balance. If the contract has not been sufficiently funded with rewards by the owner, it will seamlessly use the deposited stakes of other users to pay out the yield. This leads to a direct loss of user principal
+
+root cause :
+lack of accounting separation.
+
+attack path :
+alice and Bob each stake 1000 tokens (Contract balance = 2000).
+ owner never or forgets to call fundRewards().
+time passes, and Alice has accrued 500 tokens in rewards.
+Alice calls claimRewards(). The contract sends her 500 tokens from its 2000 token balance.
+The contract balance is now 1500 tokens, but Alice and Bob still have 1000 tokens each recorded in their staked mapping.
+500 tokens of Bob's principal have essentially been stolen to pay Alice's reward. 
+Bob will inevitably be unable to withdraw his full stake later.
+
+
+even if the owner funds the contract through fundRewards()
+the reward and users principal are both stored in the same contract and not segregated .
+with more number of user , the total amount will be mixed up with both rewards and staked deposits .
+so either we should track the total amount of staked tokens or the rewards to avoid this issue 
 totalStaked += amount;
-
-// In withdraw():
-totalStaked -= amount;
-
-// In _claimRewards():
-uint256 availableRewards = stakeToken.balanceOf(address(this)) - totalStaked;
-require(availableRewards >= reward, "Insufficient reward pool");
-stakeToken.transfer(user, reward);
-```
+or 
+rewardPool += amount;
 
 ---
 
-## H-5 — Reentrancy via CEI Violation in `_claimRewards` Allows Recursive Reward Drain
+## 6. Incorrect reward calculation and update destroys previously accrued user yield
 
-### Summary / Impact
+- Date: 2026-03-09T11:52:53.127422
+- Severity: High
+- Scope: -
+- Reporter: @yun0hu
 
-In `_claimRewards`, the external `stakeToken.transfer` call is made **before** `lastUpdate[user]` is updated. This violates the Checks-Effects-Interactions (CEI) pattern. If the token supports transfer hooks (e.g., ERC777), an attacker can re-enter `claimRewards()` during the transfer. Because `lastUpdate` has not been updated yet, the contract calculates the same reward again and transfers it, allowing recursive draining of the entire contract balance.
+### Details
 
-### Root Cause
+Incorrect reward calculation and update destroys previously accrued user yield
 
-```solidity
-stakeToken.transfer(user, reward);     // ← External call first
-lastUpdate[user] = block.timestamp;    // ← State update happens AFTER
-```
+When updateRate() modifies rewardRatePerSecond, the new rate is applied to the entire timespan i.e, a user's lastUpdate timestamp. Because the contract uses elapsed * currentRate instead of caching rewards before a rate change, any adjustment to the rate alters the yield pf the users who already earned in the past. If the rate is decreased, users suffer a direct, mathematical loss of  previously accrued funds.
 
-### Attack Path
+root cause :
+ uint256 reward = elapsed * rewardRatePerSecond; mathematically assumes the rate has been constant since lastUpdate. It fails to account for rate fluctuations during the elapsed window.
 
-Attacker stakes tokens and waits for rewards to accrue.
-Attacker calls `claimRewards()`.
-`_claimRewards` calculates the reward and calls `stakeToken.transfer(attacker, reward)`.
-The token triggers a receive hook on the attacker's contract.
-Inside the hook, attacker calls `claimRewards()` again.
-Since lastUpdate was not yet updated, elapsed is unchanged, and the same reward is sent again.
-Loop repeats until the entire contract balance is drained.
+attack path :
 
-### Recommended Fix
+users stake tokens for 6 months at rewardRatePerSecond = 10. They have already earned 6 months' worth of yield.
+The owner updates the rate to 5 by calling updateRate(5).
+due to the incorrect calculation in _claimRewards, the contract calculates the past 6 months using the new rate of 5.
+all users immediately lose exactly half of the rewards they had already earned prior to the update.
 
-Always update state before making external calls (CEI pattern):
+recommended path :
+we should take snapshot of each user before updating to new rate 
+or we should use different variable to track the old rate and new rate
 
-```solidity
+---
+
+## 7. State variables are updated after external calls, opening the contract to Reentrancy attack
+
+- Date: 2026-03-11T04:16:17.388598
+- Severity: High
+- Scope: audit-arena-week-6.sol:_claimRewards()
+- Reporter: @yun0hu
+
+### Details
+
+State variables are updated after external calls, opening the contract to Reentrancy attack
+
+In _claimRewards, the stakeToken.transfer call is made before the user's lastUpdate state is updated. This severely violates the Checks-Effects-Interactions (CEI) pattern. If the ERC20 token allows for callbacks (such as ERC777 tokens or tokens with hook implementations), an attacker can hijack the execution flow during the transfer and re-enter the contract's claimRewards() or withdraw() function
+
+root cause :
+the lastUpdate[user] = block.timestamp; state interaction occurs after the external call stakeToken.transfer(user, reward);
+
+attack path :
+The staking protocol uses a token that supports backward compatible receiver hooks.
+An attacker stakes and waits for a reward to accrue.
+attacker calls claimRewards().
+_claimRewards calculates the reward and calls stakeToken.transfer(attacker, reward).
+The token contract executes the transfer and triggers a callback function on the attacker's smart contract.
+Inside the hook, the attacker's contract calls claimRewards() again.
+Since lastUpdate was not yet updated by the previous execution, elapsed is still the same, and the contract initiates another transfer of the same reward.
+The loop continues until the contract's balance is drained.
+
+
+recommended fix :
 function _claimRewards(address user) internal {
+// check
     if (lastUpdate[user] == 0) {
         lastUpdate[user] = block.timestamp;
         return;
@@ -202,75 +219,13 @@ function _claimRewards(address user) internal {
     uint256 elapsed = block.timestamp - lastUpdate[user];
     uint256 reward = elapsed * rewardRatePerSecond;
 
-    // EFFECTS: Update state first
+    // EFFECTS
     lastUpdate[user] = block.timestamp;
 
-    // INTERACTIONS: External call last
+    // INTERACTIONS
     if (reward > 0) {
         stakeToken.transfer(user, reward);
     }
 }
-```
 
 ---
-
-## H-6 — sudden reward rate change destroys previously accrued user yield
-
-### Summary / Impact
-
-When `updateRate()` modifies `rewardRatePerSecond`, the new rate is retroactively applied to the **entire timespan** since each user's `lastUpdate` timestamp. The contract's naive formula does not cache rewards earned under the old rate. If the rate is decreased, users suffer a direct mathematical loss of legitimately earned, unclaimed yield.
-
-### Root Cause
-
-The formula:
-
-```solidity
-uint256 reward = elapsed * rewardRatePerSecond;
-```
-
-assumes the rate has been constant for the entire `elapsed` duration, which is mathematically incorrect after any rate change.
-
-### Attack Path
-
-Users stake tokens for 6 months at `rewardRatePerSecond = 10`.
-Owner calls `updateRate(5)` to reduce inflation.
-The contract now calculates the past 6 months of rewards using rate `5` instead of `10`.
-All users immediately — and silently — lose **half** of the yield they legitimately earned before the change.
-
-### Recommended Fix
-
-Before updating the rate, trigger a global checkpoint to lock in rewards earned under the old rate. Alternatively, adopt the Synthetix `rewardPerTokenStored` accumulator architecture so that rate changes only affect time elapsed **after** the update.
-
----
-
-## M-1 — `tx.origin` Used for Authorization Enables Phishing Attack on `emergencyWithdraw`
-
-### Summary / Impact
-
-The `emergencyWithdraw` function uses `tx.origin == owner` for authorization instead of `msg.sender`. `tx.origin` refers to the original EOA that started the transaction chain, not the immediate caller. A malicious contract can trick the owner into calling it, which then calls `SimpleStaking.emergencyWithdraw()`. The check passes because `tx.origin` is still the owner, allowing the attacker to forcibly trigger a full withdrawal and break the protocol for all users.
-
-### Root Cause
-
-```solidity
-require(tx.origin == owner, "Not owner"); // ← tx.origin is phishing-vulnerable
-```
-
-### Attack Path
-
-Attacker deploys a malicious contract with a hidden call to `SimpleStaking.emergencyWithdraw()`.
-Attacker socially engineers the `owner` into calling a function on the malicious contract.
-The malicious contract internally calls `emergencyWithdraw()`.
-`tx.origin == owner` evaluates to `true` since the owner's EOA initiated the full call chain.
-All staked deposits and reward tokens are transferred to the `owner` address, permanently breaking the protocol for all stakers.
-
-### Recommended Fix
-
-Always use `msg.sender` for authorization:
-
-```solidity
-require(msg.sender == owner, "Not owner");
-```
-
----
-
-*End of Report*
